@@ -310,44 +310,32 @@ def update_inference_inputs(
     - logits (torch.Tensor): Updated logits.
     - new_token (int): Updated counter for the new tokens added.
     """
+    # Calculate the starting position for new tokens based on the previous input length
     prev_input_len = input_ids.shape[1]
-    # Retrieve the accepted candidate sequence
-    if best_candidate >= 0:
-        tgt = candidates[best_candidate, :accept_length + 1]
-    else:
-        tgt = torch.tensor([], dtype=torch.long, device=candidates.device)
-
-    # Update the input_ids with the accepted sequence
-    input_ids = torch.cat([input_ids, tgt[None, :]], dim=-1)
-
-    # Update the past key-value states
-    if outputs is not None and accept_length > 0:
-        # The accepted tokens are from the draft model
-        # so we need to update the key-value cache
-        accepted_len = accept_length.item()
-        select_indices = retrieve_indices[best_candidate, :accepted_len]
-        for i in range(len(past_key_values_data)):
-            past_key_values_data[i].copy_from(
-                outputs.past_key_values[i],
-                select_indices,
-                prev_input_len,
-            )
+    # Map the best candidate indices to the original indices in the sequence
+    select_indices = (
+        retrieve_indices[best_candidate, : accept_length + 1] + prev_input_len
+    )
+    # Append the tokens from the best candidate to the input sequence
+    input_ids = torch.cat(
+        [input_ids, candidates[None, best_candidate, : accept_length + 1]], dim=-1
+    )
+    # Update the past key values based on the selected tokens
+    # Source tensor that contains relevant past information based on the selected candidate
+    tgt = past_key_values_data[..., select_indices, :]
+    # Destination tensor where the relevant past information will be stored
+    dst = past_key_values_data[..., prev_input_len : prev_input_len + tgt.shape[-2], :]
+    # Copy relevant past information from the source to the destination
+    dst.copy_(tgt, non_blocking=True)
 
     # Update the current length tensor (currently only support batch size is 1)
-    current_length_data.fill_(prev_input_len + accept_length + 1)
+    current_length_data.fill_(prev_input_len + tgt.shape[-2])
 
-    if outputs is not None and accept_length < candidates.shape[1]:
-        # The new logits are the ones from the original model.
-        logits = logits[None, best_candidate, accept_length : accept_length + 1]
-    elif outputs is not None:
-        # The new logits are the ones from the draft model.
-        logits = outputs.logits[None, -1, None]
-    else:
-        # In simulation mode, outputs is None. We take the last token's logit.
-        logits = logits[:, -1:, :]
+    # Extract logits for the accepted tokens
+    logits = logits[None, best_candidate, accept_length : accept_length + 1]
 
     # Update the new token counter
-    new_token += accept_length.item() + 1
+    new_token += accept_length + 1
 
     return input_ids, logits, new_token
 

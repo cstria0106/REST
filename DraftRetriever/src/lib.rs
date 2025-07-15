@@ -1,24 +1,24 @@
-// The code for retrival is adapted from https://github.com/Intsights/PySubstringSearch; 
+// The code for retrival is adapted from https://github.com/Intsights/PySubstringSearch;
 // The code for drafft buffer is adapted from https://github.com/FasterDecoding/Medusa/blob/main/medusa/model/utils.py#L31-L124
 use ahash::AHashSet;
-use byteorder::{ReadBytesExt, WriteBytesExt, ByteOrder, LittleEndian};
+use byteorder::{ByteOrder, LittleEndian, ReadBytesExt, WriteBytesExt};
 use parking_lot::Mutex;
 use pyo3::exceptions;
 use pyo3::prelude::*;
+use pyo3::types::PyList;
 use rayon::prelude::*;
+use std::cmp;
+use std::cmp::Ordering;
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::fs;
 use std::fs::File;
+use std::io::Cursor;
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::str;
 use std::sync::Arc;
-use std::collections::HashMap;
-use std::cmp::Reverse;
-use std::collections::HashSet;
-use std::cmp;
-use std::cmp::Ordering;
-use pyo3::types::PyList;
-use std::collections::BinaryHeap;
-use std::fs;
-use std::io::Cursor;
 
 extern "C" {
     pub fn libsais_int(
@@ -30,10 +30,7 @@ extern "C" {
     ) -> i32;
 }
 
-fn construct_suffix_array(
-    buffer: &[i32],
-    vocab_size: i32,
-) -> Vec<i32> {
+fn construct_suffix_array(buffer: &[i32], vocab_size: i32) -> Vec<i32> {
     let mut suffix_array = vec![0; buffer.len()];
 
     unsafe {
@@ -70,20 +67,14 @@ impl Writer {
         let max_chunk_len = max_chunk_len.unwrap_or(512 * 1024 * 1024);
         let vocab_size = vocab_size.unwrap_or(35000);
 
-        Ok(
-            Writer {
-                index_file,
-                buffer: Vec::with_capacity(max_chunk_len),
-                vocab_size,
-            }
-        )
+        Ok(Writer {
+            index_file,
+            buffer: Vec::with_capacity(max_chunk_len),
+            vocab_size,
+        })
     }
 
-    fn add_entry(
-        &mut self,
-        py_text: &PyList,
-    ) -> PyResult<()> {
-
+    fn add_entry(&mut self, py_text: &PyList) -> PyResult<()> {
         let mut text = Vec::new();
         for item in py_text.iter() {
             let num: i32 = item.extract()?;
@@ -104,21 +95,21 @@ impl Writer {
         Ok(())
     }
 
-    fn dump_data(
-        &mut self,
-    ) -> PyResult<()> {
+    fn dump_data(&mut self) -> PyResult<()> {
         if self.buffer.is_empty() {
             return Ok(());
         }
 
-        self.index_file.write_u32::<LittleEndian>((self.buffer.len() * 2) as u32)?;
+        self.index_file
+            .write_u32::<LittleEndian>((self.buffer.len() * 2) as u32)?;
 
         for &item in &self.buffer {
             self.index_file.write_u16::<LittleEndian>(item as u16)?;
         }
 
         let suffix_array = construct_suffix_array(&self.buffer, self.vocab_size);
-        self.index_file.write_u32::<LittleEndian>((suffix_array.len() * 4) as u32)?;
+        self.index_file
+            .write_u32::<LittleEndian>((suffix_array.len() * 4) as u32)?;
         for suffix in suffix_array {
             self.index_file.write_i32::<LittleEndian>(suffix)?;
         }
@@ -127,9 +118,7 @@ impl Writer {
         Ok(())
     }
 
-    fn finalize(
-        &mut self,
-    ) -> PyResult<()> {
+    fn finalize(&mut self) -> PyResult<()> {
         if !self.buffer.is_empty() {
             self.dump_data()?;
         }
@@ -140,9 +129,7 @@ impl Writer {
 }
 
 impl Drop for Writer {
-    fn drop(
-        &mut self,
-    ) {
+    fn drop(&mut self) {
         self.finalize().unwrap();
     }
 }
@@ -162,9 +149,7 @@ struct Reader {
 #[pymethods]
 impl Reader {
     #[new]
-    fn new(
-        index_file_path: &str,
-    ) -> PyResult<Self> {
+    fn new(index_file_path: &str) -> PyResult<Self> {
         let index_file = File::open(index_file_path)?;
         let mut index_file = BufReader::new(index_file);
         let index_file_metadata = std::fs::metadata(index_file_path)?;
@@ -185,22 +170,19 @@ impl Reader {
 
             bytes_read += 4 + 4 + data_file_len as u64 + suffixes_file_len as u64;
 
-
             let mut data: Vec<i32> = Vec::new();
 
             for i in (0..data_u8.len()).step_by(2) {
-                let int = LittleEndian::read_u16(&data_u8[i..i+2]) as i32;
+                let int = LittleEndian::read_u16(&data_u8[i..i + 2]) as i32;
                 data.push(int);
             }
 
-            sub_indexes.push(
-                SubIndex {
-                    data,
-                    index_file: Cursor::new(fs::read(index_file_path).unwrap()), // BufReader::new(File::open(index_file_path)?), // Cursor::new(fs::read(index_file_path).unwrap()),
-                    suffixes_file_start,
-                    suffixes_file_end,
-                }
-            );
+            sub_indexes.push(SubIndex {
+                data,
+                index_file: Cursor::new(fs::read(index_file_path).unwrap()), // BufReader::new(File::open(index_file_path)?), // Cursor::new(fs::read(index_file_path).unwrap()),
+                suffixes_file_start,
+                suffixes_file_end,
+            });
         }
 
         Ok(Reader { sub_indexes })
@@ -212,8 +194,13 @@ impl Reader {
         k: Option<i32>,
         choices: Option<i32>,
         long: Option<i32>,
-    ) -> PyResult<(Vec<Vec<i32>>, Vec<Vec<i32>>, Vec<i32>, Vec<i32>, Vec<Vec<i32>>)> {
-
+    ) -> PyResult<(
+        Vec<Vec<i32>>,
+        Vec<Vec<i32>>,
+        Vec<i32>,
+        Vec<i32>,
+        Vec<Vec<i32>>,
+    )> {
         // substring_i32 is just a rust version of py_substring
         let mut substring_i32 = Vec::new();
         for item in py_substring.iter() {
@@ -224,95 +211,105 @@ impl Reader {
         let results = Arc::new(Mutex::new(Vec::new()));
 
         // each sub index is a buffer/suffix pair
-        self.sub_indexes.par_iter_mut().for_each(
-            |sub_index| {
-                let mut start_of_indices = None;
-                let mut end_of_indices = None;
+        self.sub_indexes.par_iter_mut().for_each(|sub_index| {
+            let mut start_of_indices = None;
+            let mut end_of_indices = None;
 
-                // since suffix arrays have the suffixes in sorted order, we do a binary search
-                // over the suffix array
-                // this binary search finds the start of the matching suffixes
-                let mut left_anchor = sub_index.suffixes_file_start;
-                let mut right_anchor = sub_index.suffixes_file_end - 4;
-                while left_anchor <= right_anchor {
-                    let middle_anchor = left_anchor + ((right_anchor - left_anchor) / 4 / 2 * 4);
-                    sub_index.index_file.seek(SeekFrom::Start(middle_anchor as u64)).unwrap();
-                    // data_index is the value at middle_anchor in the suffix array
-                    let data_index = sub_index.index_file.read_i32::<LittleEndian>().unwrap();
-                    // line is the actual suffix
-                    let line = &sub_index.data[(data_index) as usize..];
+            // since suffix arrays have the suffixes in sorted order, we do a binary search
+            // over the suffix array
+            // this binary search finds the start of the matching suffixes
+            let mut left_anchor = sub_index.suffixes_file_start;
+            let mut right_anchor = sub_index.suffixes_file_end - 4;
+            while left_anchor <= right_anchor {
+                let middle_anchor = left_anchor + ((right_anchor - left_anchor) / 4 / 2 * 4);
+                sub_index
+                    .index_file
+                    .seek(SeekFrom::Start(middle_anchor as u64))
+                    .unwrap();
+                // data_index is the value at middle_anchor in the suffix array
+                let data_index = sub_index.index_file.read_i32::<LittleEndian>().unwrap();
+                // line is the actual suffix
+                let line = &sub_index.data[(data_index) as usize..];
 
-                    // we don't use the entire suffix. we look for suffixes that start with the substring we're looking for
-                    // the suffix array sorts suffixes based on the start of the suffix, so this technique is sound
-                    // the "match length" is defined by the length of substring_i32. the suffix array doesn't need to worry about "match length"
-                    if line.starts_with(&substring_i32) {
-                        start_of_indices = Some(middle_anchor);
-                        right_anchor = middle_anchor - 4;
-                    } else {
-                        match line.cmp(&substring_i32) {
-                            std::cmp::Ordering::Less => left_anchor = middle_anchor + 4,
-                            std::cmp::Ordering::Greater => right_anchor = middle_anchor - 4,
-                            std::cmp::Ordering::Equal => {},
-                        };
-                    }
+                // we don't use the entire suffix. we look for suffixes that start with the substring we're looking for
+                // the suffix array sorts suffixes based on the start of the suffix, so this technique is sound
+                // the "match length" is defined by the length of substring_i32. the suffix array doesn't need to worry about "match length"
+                if line.starts_with(&substring_i32) {
+                    start_of_indices = Some(middle_anchor);
+                    right_anchor = middle_anchor - 4;
+                } else {
+                    match line.cmp(&substring_i32) {
+                        std::cmp::Ordering::Less => left_anchor = middle_anchor + 4,
+                        std::cmp::Ordering::Greater => right_anchor = middle_anchor - 4,
+                        std::cmp::Ordering::Equal => {}
+                    };
                 }
-                if start_of_indices.is_none() {
-                    return;
-                }
-                
-                // this binary search finds the end of the matching suffixes
-                let mut right_anchor = sub_index.suffixes_file_end - 4;
-                while left_anchor <= right_anchor {
-                    let middle_anchor = left_anchor + ((right_anchor - left_anchor) / 4 / 2 * 4);
-                    sub_index.index_file.seek(SeekFrom::Start(middle_anchor as u64)).unwrap();
-                    let data_index = sub_index.index_file.read_i32::<LittleEndian>().unwrap();
-                    let line = &sub_index.data[(data_index) as usize..];
-                    if line.starts_with(&substring_i32) {
-                        end_of_indices = Some(middle_anchor);
-                        left_anchor = middle_anchor + 4;
-                    } else {
-                        match line.cmp(&substring_i32) {
-                            std::cmp::Ordering::Less => left_anchor = middle_anchor + 4,
-                            std::cmp::Ordering::Greater => right_anchor = middle_anchor - 4,
-                            std::cmp::Ordering::Equal => {},
-                        };
-                    }
-                }
-
-                let start_of_indices = start_of_indices.unwrap();
-                let end_of_indices = end_of_indices.unwrap();
-
-                let mut suffixes = vec![0; end_of_indices - start_of_indices + 4];
-
-                sub_index.index_file.seek(SeekFrom::Start(start_of_indices as u64)).unwrap();
-                sub_index.index_file.read_exact(&mut suffixes).unwrap();
-
-                let mut matches_ranges = AHashSet::new();
-
-                let mut cnt = 0;
-                let k = k.unwrap_or(5000);
-                let long = long.unwrap_or(10);
-                let indices_size = (end_of_indices - start_of_indices + 4) / 4;
-                let initial_capacity = std::cmp::min(indices_size, k as usize);
-                let mut local_results = Vec::with_capacity(initial_capacity);
-
-                for suffix in suffixes.chunks_mut(4) {
-                    let data_index = LittleEndian::read_i32(suffix);
-                    if matches_ranges.insert(data_index) {
-                        let sub_string_plus = &sub_index.data[data_index as usize + substring_i32.len() ..std::cmp::min(data_index as usize + substring_i32.len() + long as usize,  sub_index.data.len())];
-                    
-                        local_results.push(sub_string_plus.to_vec());
-                        cnt += 1;
-                        if cnt >= k as usize {
-                            break;
-                        }
-
-                    }
-                }
-
-                results.lock().extend(local_results);
             }
-        );
+            if start_of_indices.is_none() {
+                return;
+            }
+
+            // this binary search finds the end of the matching suffixes
+            let mut right_anchor = sub_index.suffixes_file_end - 4;
+            while left_anchor <= right_anchor {
+                let middle_anchor = left_anchor + ((right_anchor - left_anchor) / 4 / 2 * 4);
+                sub_index
+                    .index_file
+                    .seek(SeekFrom::Start(middle_anchor as u64))
+                    .unwrap();
+                let data_index = sub_index.index_file.read_i32::<LittleEndian>().unwrap();
+                let line = &sub_index.data[(data_index) as usize..];
+                if line.starts_with(&substring_i32) {
+                    end_of_indices = Some(middle_anchor);
+                    left_anchor = middle_anchor + 4;
+                } else {
+                    match line.cmp(&substring_i32) {
+                        std::cmp::Ordering::Less => left_anchor = middle_anchor + 4,
+                        std::cmp::Ordering::Greater => right_anchor = middle_anchor - 4,
+                        std::cmp::Ordering::Equal => {}
+                    };
+                }
+            }
+
+            let start_of_indices = start_of_indices.unwrap();
+            let end_of_indices = end_of_indices.unwrap();
+
+            let mut suffixes = vec![0; end_of_indices - start_of_indices + 4];
+
+            sub_index
+                .index_file
+                .seek(SeekFrom::Start(start_of_indices as u64))
+                .unwrap();
+            sub_index.index_file.read_exact(&mut suffixes).unwrap();
+
+            let mut matches_ranges = AHashSet::new();
+
+            let mut cnt = 0;
+            let k = k.unwrap_or(5000);
+            let long = long.unwrap_or(10);
+            let indices_size = (end_of_indices - start_of_indices + 4) / 4;
+            let initial_capacity = std::cmp::min(indices_size, k as usize);
+            let mut local_results = Vec::with_capacity(initial_capacity);
+
+            for suffix in suffixes.chunks_mut(4) {
+                let data_index = LittleEndian::read_i32(suffix);
+                if matches_ranges.insert(data_index) {
+                    let sub_string_plus = &sub_index.data[data_index as usize + substring_i32.len()
+                        ..std::cmp::min(
+                            data_index as usize + substring_i32.len() + long as usize,
+                            sub_index.data.len(),
+                        )];
+
+                    local_results.push(sub_string_plus.to_vec());
+                    cnt += 1;
+                    if cnt >= k as usize {
+                        break;
+                    }
+                }
+            }
+
+            results.lock().extend(local_results);
+        });
 
         let results = results.lock();
 
@@ -328,7 +325,7 @@ impl Reader {
                 *counter += 1;
             }
         }
-        
+
         let choices = choices.unwrap_or(64);
         // The items in the heap must be a Trie.
         let mut heap = BinaryHeap::new();
@@ -348,30 +345,46 @@ impl Reader {
         let verified: Vec<_> = verified.into_iter().collect();
 
         // Because multiple nodes in the Trie may have same weights around the threshold, the number of draft tokens may exceed choices
-        // We roughly cut nodes to be less than choices in most cases. 
+        // We roughly cut nodes to be less than choices in most cases.
         let paths = cut_to_choices(verified, choices);
 
         let (draft_choices, max_branch) = get_draft_choices(paths.clone());
 
         if draft_choices.len() > choices as usize {
             // It might not be cut enough because cut_to_choices() is best effort, as mentioned in the comment above
-            return Err(exceptions::PyValueError::new_err("draft_choices was not cut enough"));
+            return Err(exceptions::PyValueError::new_err(
+                "draft_choices was not cut enough",
+            ));
         }
 
-        let (draft_attn_mask, tree_indices, draft_position_ids, retrieve_indices) = generate_draft_buffers(draft_choices.clone(), max_branch);
+        let (draft_attn_mask, tree_indices, draft_position_ids, retrieve_indices) =
+            generate_draft_buffers(draft_choices.clone(), max_branch);
 
         let max_length = paths.iter().map(|path| path.len()).max().unwrap_or(0);
 
-        Ok((paths.into_iter().map(|path| pad_path(path, max_length, -2)).collect::<Vec<Vec<i32>>>(), draft_attn_mask, tree_indices, draft_position_ids, retrieve_indices))
+        Ok((
+            paths
+                .into_iter()
+                .map(|path| pad_path(path, max_length, -2))
+                .collect::<Vec<Vec<i32>>>(),
+            draft_attn_mask,
+            tree_indices,
+            draft_position_ids,
+            retrieve_indices,
+        ))
     }
 }
 
-
-
 fn cut_to_choices(paths: Vec<Vec<i32>>, choices: i32) -> Vec<Vec<i32>> {
-    let mut count: Vec<(usize, usize)> = paths.iter()
-                                               .map(|p| (p.iter().collect::<std::collections::HashSet<&i32>>().len(), paths.iter().position(|x| x == p).unwrap()))
-                                               .collect();
+    let mut count: Vec<(usize, usize)> = paths
+        .iter()
+        .map(|p| {
+            (
+                p.iter().collect::<std::collections::HashSet<&i32>>().len(),
+                paths.iter().position(|x| x == p).unwrap(),
+            )
+        })
+        .collect();
     count.sort_by(|a, b| b.0.cmp(&a.0));
 
     let mut total_unique = count.iter().map(|(x, _)| x).sum::<usize>();
@@ -386,9 +399,13 @@ fn cut_to_choices(paths: Vec<Vec<i32>>, choices: i32) -> Vec<Vec<i32>> {
         }
     }
 
-    paths.into_iter().enumerate().filter(|(i, _)| !to_remove.contains(i)).map(|(_, p)| p).collect()
+    paths
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| !to_remove.contains(i))
+        .map(|(_, p)| p)
+        .collect()
 }
-
 
 fn get_draft_choices(paths: Vec<Vec<i32>>) -> (Vec<Vec<i32>>, i32) {
     let mut path_dict: HashMap<i32, HashMap<i32, i32>> = HashMap::new();
@@ -435,8 +452,6 @@ fn get_draft_choices(paths: Vec<Vec<i32>>) -> (Vec<Vec<i32>>, i32) {
     (draft_choices, max_branch)
 }
 
-
-
 fn pad_path(path: Vec<i32>, length: usize, pad_value: i32) -> Vec<i32> {
     let mut path = path;
     while path.len() < length {
@@ -445,9 +460,10 @@ fn pad_path(path: Vec<i32>, length: usize, pad_value: i32) -> Vec<i32> {
     path
 }
 
-
-fn generate_draft_buffers(draft_choices: Vec<Vec<i32>>, topk: i32) -> (Vec<Vec<i32>>, Vec<i32>, Vec<i32>, Vec<Vec<i32>>) {
-
+fn generate_draft_buffers(
+    draft_choices: Vec<Vec<i32>>,
+    topk: i32,
+) -> (Vec<Vec<i32>>, Vec<i32>, Vec<i32>, Vec<Vec<i32>>) {
     // Sort the draft_choices based on their lengths and then their values
     let mut sorted_draft_choices = draft_choices;
     sorted_draft_choices.sort_by(|a, b| match a.len().cmp(&b.len()) {
@@ -456,9 +472,8 @@ fn generate_draft_buffers(draft_choices: Vec<Vec<i32>>, topk: i32) -> (Vec<Vec<i
     });
 
     let draft_len = sorted_draft_choices.len() + 1;
-    assert! (draft_len <= 65, "draft_len should not exceed 65");
     // Initialize depth_counts to keep track of how many choices have a particular depth
-    let mut depth_counts:Vec<i32> = vec![0; draft_len];
+    let mut depth_counts: Vec<i32> = vec![0; draft_len];
     let mut prev_depth = 0;
     for path in &sorted_draft_choices {
         let depth = path.len();
@@ -469,7 +484,7 @@ fn generate_draft_buffers(draft_choices: Vec<Vec<i32>>, topk: i32) -> (Vec<Vec<i
         prev_depth = depth;
     }
     // Create the attention mask for draft
-    let mut draft_attn_mask:Vec<Vec<i32>> = vec![vec![0; draft_len]; draft_len];
+    let mut draft_attn_mask: Vec<Vec<i32>> = vec![vec![0; draft_len]; draft_len];
     for i in 0..draft_len {
         draft_attn_mask[i][0] = 1;
         draft_attn_mask[i][i] = 1;
@@ -485,7 +500,14 @@ fn generate_draft_buffers(draft_choices: Vec<Vec<i32>>, topk: i32) -> (Vec<Vec<i
 
             let mut ancestor_idx = vec![];
             for c in 0..(cur_draft_choice.len() - 1) {
-                let index = sorted_draft_choices.iter().position(|x| x[..=cmp::min(c, x.len() - 1)] == cur_draft_choice[..=cmp::min(c, cur_draft_choice.len() - 1)]).unwrap() + 1;
+                let index = sorted_draft_choices
+                    .iter()
+                    .position(|x| {
+                        x[..=cmp::min(c, x.len() - 1)]
+                            == cur_draft_choice[..=cmp::min(c, cur_draft_choice.len() - 1)]
+                    })
+                    .unwrap()
+                    + 1;
                 ancestor_idx.push(index);
             }
 
@@ -502,7 +524,8 @@ fn generate_draft_buffers(draft_choices: Vec<Vec<i32>>, topk: i32) -> (Vec<Vec<i
     for i in 0..depth_counts.len() {
         for j in 0..depth_counts[i] {
             let cur_draft_choice = &sorted_draft_choices[(start + j) as usize];
-            draft_tree_indices[(start + j + 1) as usize] = cur_draft_choice.last().unwrap() + topk * (i as i32) + 1;
+            draft_tree_indices[(start + j + 1) as usize] =
+                cur_draft_choice.last().unwrap() + topk * (i as i32) + 1;
         }
         start += depth_counts[i];
     }
@@ -527,7 +550,10 @@ fn generate_draft_buffers(draft_choices: Vec<Vec<i32>>, topk: i32) -> (Vec<Vec<i
             continue;
         } else {
             for c in 0..cur_draft_choice.len() {
-                let index = sorted_draft_choices.iter().position(|x| *x == cur_draft_choice[0..=c]).unwrap();
+                let index = sorted_draft_choices
+                    .iter()
+                    .position(|x| *x == cur_draft_choice[0..=c])
+                    .unwrap();
                 retrieve_indice.push(index as i32);
                 retrieve_paths.push(cur_draft_choice[0..=c].to_vec());
             }
@@ -535,7 +561,10 @@ fn generate_draft_buffers(draft_choices: Vec<Vec<i32>>, topk: i32) -> (Vec<Vec<i
         retrieve_indices_nest.push(retrieve_indice);
     }
     let max_length = retrieve_indices_nest.iter().map(|x| x.len()).max().unwrap();
-    let mut retrieve_indices: Vec<Vec<i32>> = retrieve_indices_nest.iter().map(|x| pad_path(x.clone(), max_length, -2)).collect();
+    let mut retrieve_indices: Vec<Vec<i32>> = retrieve_indices_nest
+        .iter()
+        .map(|x| pad_path(x.clone(), max_length, -2))
+        .collect();
 
     for i in 0..retrieve_indices.len() {
         for j in 0..retrieve_indices[i].len() {
@@ -547,19 +576,18 @@ fn generate_draft_buffers(draft_choices: Vec<Vec<i32>>, topk: i32) -> (Vec<Vec<i
         retrieve_indices[i].insert(0, 0);
     }
 
-
-    (draft_attn_mask, draft_tree_indices, draft_position_ids, retrieve_indices)
+    (
+        draft_attn_mask,
+        draft_tree_indices,
+        draft_position_ids,
+        retrieve_indices,
+    )
 }
 
-
 #[pymodule]
-fn draftretriever(
-    _py: Python,
-    m: &PyModule,
-) -> PyResult<()> {
+fn draftretriever(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<Writer>()?;
     m.add_class::<Reader>()?;
 
     Ok(())
 }
-
